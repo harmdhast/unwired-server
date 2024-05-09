@@ -1,13 +1,16 @@
 version: '3.8'
 services:
   devcontainer:
+    container_name: unwired-server
     image: mcr.microsoft.com/devcontainers/python:3.12
     volumes:
       - ../..:/workspaces:cached
-    network_mode: service:db
     command: sleep infinity
+    networks:
+      - unwired-net
 
   db:
+    container_name: postgres
     image: postgres:latest
     restart: unless-stopped
     volumes:
@@ -16,6 +19,29 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_USER: postgres
       POSTGRES_DB: postgres
+    networks:
+      - unwired-net
+  
+  pgadmin4:
+    container_name: pgadmin4
+    image: dpage/pgadmin4:8.6
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@lanops.net
+      PGADMIN_DEFAULT_PASSWORD: postgres
+      PGADMIN_LISTEN_PORT: 80
+    ports:
+      - 8080:80
+    depends_on:
+      - db
+    volumes:
+      - pgadmin:/var/lib/pgadmin
+    networks:
+      - unwired-net
 
 volumes:
   postgres-data:
+  pgadmin:
+
+networks:
+  unwired-net:

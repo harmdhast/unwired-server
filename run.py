@@ -1,8 +1,12 @@
+import asyncio
+import base64
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from io import BytesIO
 from typing import Annotated
 
+import distinctipy
 from fastapi import Depends
 from fastapi import FastAPI
 from fastapi import HTTPException
@@ -13,14 +17,23 @@ from fastapi.security import OAuth2PasswordRequestForm
 from jose import JWTError
 from jose import jwt
 from passlib.context import CryptContext
-from pydantic import BaseModel
+from PIL import Image
+from PIL import ImageDraw
+from PIL import ImageFont
+from pydantic import BaseModel, computed_field
+from sqlalchemy import func
 from sqlmodel import Field
 from sqlmodel import Relationship
 from sqlmodel import Session
 from sqlmodel import SQLModel
 from sqlmodel import create_engine
 from sqlmodel import select
-from PIL import Image
+from sqlmodel import text
+import time
+from sqlalchemy.orm import joinedload, object_session
+from sqlalchemy.sql import desc
+from sqlalchemy.orm import selectinload, column_property, declared_attr, contains_eager
+
 
 SECRET_KEY = "09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7"
 ALGORITHM = "HS256"
@@ -36,12 +49,20 @@ class TokenData(BaseModel):
     username: str | None = None
 
 
-class Message(SQLModel, table=True):
-    id: int | None = Field(default=None, primary_key=True)
+class MessageBase(SQLModel):
     parent_id: int | None
     content: str = Field(nullable=False)
-    author_id: int = Field(nullable=False, foreign_key="user.id")
+    group_id: int | None = Field(default=None, foreign_key="group.id", index=True)
+
+
+class Message(MessageBase, table=True):
+    id: int | None = Field(default=None, primary_key=True)
     author: "User" = Relationship()
+    author_id: int = Field(nullable=False, foreign_key="user.id", index=True)
+    at: datetime | None = Field(
+        # default_factory=datetime.now,
+        sa_column_kwargs={"server_default": text("CURRENT_TIMESTAMP")},
+    )
 
 
 class UserGroupLink(SQLModel, table=True):
@@ -49,9 +70,12 @@ class UserGroupLink(SQLModel, table=True):
     group_id: int | None = Field(default=None, foreign_key="group.id", primary_key=True)
 
 
-class User(SQLModel, table=True):
-    id: int | None = Field(default=None, primary_key=True)
+class UserBase(SQLModel):
     username: str = Field(index=True, nullable=False)
+
+
+class User(UserBase, table=True):
+    id: int | None = Field(default=None, primary_key=True)
     password: str = Field(nullable=False)
     avatar: str | None = Field(default=None)
     disabled: bool | None = None
@@ -61,17 +85,20 @@ class User(SQLModel, table=True):
     )
 
 
-class LoginResponse(Token):
-    username: str
-    avatar: str | None = None
-    disabled: bool | None = None
+class UserPublic(UserBase):
+    id: int
+
+
+class UserPublicAvatar(UserPublic):
+    avatar: str | None
 
 
 class GroupBase(SQLModel):
     name: str = Field(index=True, nullable=False)
     owner_id: int | None = Field(foreign_key="user.id")
+    # owner: "User" = Relationship()
     private: bool = Field(default=False)
-    last_message_id: int | None = Field(default=None, foreign_key="message.id")
+    # last_message_id: int | None = Field(default=None, foreign_key="message.id")
 
 
 class Group(GroupBase, table=True):
@@ -80,17 +107,41 @@ class Group(GroupBase, table=True):
         back_populates="groups",
         link_model=UserGroupLink,
     )
-
+    owner: "User" = Relationship()
     last_message: Message | None = Relationship(
-        sa_relationship_kwargs={"lazy": "joined"},
+        sa_relationship_kwargs={
+            "order_by": "desc(Message.at)",
+            "viewonly": True,
+            "uselist": False,
+        },
     )
 
 
-class GroupWithMessage(GroupBase):
-    last_message: Message | None = None
+class MessagePublic(MessageBase):
+    id: int
+    author: UserPublic
+    at: datetime
 
 
-DB_URL = "postgresql://postgres:postgres@localhost:5432/postgres"
+class GroupPublic(GroupBase):
+    id: int
+    owner: UserPublic | None = None
+    members: list[UserPublic] | None = []
+    # messages: list[Message] | None = None
+    last_message: MessagePublic | None = None
+
+
+class LoginResponse(Token):
+    username: str
+    avatar: str | None = None
+    disabled: bool | None = None
+
+
+class MessageWithAuthor(MessageBase):
+    pass
+
+
+DB_URL = "postgresql://postgres:postgres@postgres:5432/postgres"
 
 engine = create_engine(DB_URL, echo=True)
 
@@ -105,10 +156,27 @@ async def lifespan(app: FastAPI):
     # Load the ML model
     create_db_and_tables()
     user = create_user(User(username="test", password="test"))
+    my_id1 = user.id
     user2 = create_user(User(username="test2", password="test"))
-    my_id = user2.id
+    my_id2 = user2.id
     group = await create_group("Test Group", [user, user2], True, user)
-    send_message_to_group(group.id, "Test message", my_id)
+
+    for i in range(20):
+        send_message_to_group(
+            group.id, "Lorem ipsum dolor sit amet, consectetur adipiscing elit.", my_id1
+        )
+        await asyncio.sleep(0.1)
+        send_message_to_group(
+            group.id,
+            "Fusce vitae magna augue. Morbi ut ligula sollicitudin, pellentesque est vitae, pellentesque magna. In hac habitasse platea dictumst.",
+            my_id2,
+        )
+        await asyncio.sleep(0.1)
+        send_message_to_group(group.id, "Vivamus dictum ligula ante.", my_id2)
+        await asyncio.sleep(0.1)
+        send_message_to_group(
+            group.id, "Morbi id arcu sit amet eros porttitor bibendum.", my_id1
+        )
     yield
 
 
@@ -149,31 +217,44 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None):
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
-def create_avatar(initials, size=128, bgcolor=None, textcolor=None):
+def create_avatar(initials, size=256, bgcolor=None, textcolor=None):
     img_size = (size, size)
-    color1 = 
-    
-    img = Image.new("RGB", img_size, color=bgcolor)
+    font_size = size / 2
+
+    if not bgcolor:
+        bgcolor = distinctipy.get_random_color(pastel_factor=0.5)
+
+    if not textcolor:
+        textcolor = distinctipy.get_text_color(bgcolor)
+
+    img = Image.new("RGB", img_size, color=distinctipy.get_rgb256(bgcolor))
     draw = ImageDraw.Draw(img)
 
     # Load the default font with a custom size
-    font = ImageFont.load_default()
+    font = ImageFont.load_default(size=font_size)
 
-    # Calculate text width and height
-    bounding_box = font.getbbox(initials)
-    text_width = bounding_box[2] - bounding_box[0]
-    text_height = bounding_box[3] - bounding_box[1]
+    draw.text(
+        (size / 2, size / 2),
+        text=initials,
+        fill=distinctipy.get_rgb256(textcolor),
+        font=font,
+        anchor="mm",
+    )
 
-    # Calculate position for centered text
-    position = ((img_size[0] - text_width) / 2, (img_size[1] - text_height) / 2)
-
-    draw.text(position, initials, fill=textcolor, font=font)
     return img
+
+
+# Convert Image to Base64
+def im_2_b64(image: Image):
+    buff = BytesIO()
+    image.save(buff, format="JPEG")
+    return base64.b64encode(buff.getvalue()).decode()
 
 
 @app.post("/users/")
 def create_user(user: User):
     user.password = get_password_hash(user.password)
+    user.avatar = im_2_b64(create_avatar(user.username[0].upper()))
     with Session(engine) as session:
         session.add(user)
         session.commit()
@@ -263,17 +344,36 @@ async def create_group(
         return group
 
 
-@app.get("/groups/")
-async def list_groups(
-    current_user: User = Depends(get_current_user),
-) -> list[GroupWithMessage]:
+@app.get("/groups/test", response_model=list[GroupPublic])
+async def test_groups():
     with Session(engine) as session:
-        statement = select(Group).join(
-            UserGroupLink,
-            UserGroupLink.user_id == current_user.id,
+        statement = select(Group).options(
+            joinedload(Group.owner), joinedload(Group.members)
         )
 
-        return session.exec(statement).all()
+        return session.exec(statement).unique().all()
+
+
+@app.get("/groups/", response_model=list[GroupPublic])
+async def list_groups(
+    current_user: User = Depends(get_current_user),
+):
+    with Session(engine) as session:
+        statement = (
+            select(Group)
+            .join(UserGroupLink)
+            .options(
+                joinedload(Group.owner),
+                joinedload(Group.members),
+                joinedload(Group.last_message).joinedload(
+                    Message.author, innerjoin=True
+                ),
+            )
+            .filter(UserGroupLink.user_id == current_user.id)
+        ).limit(1)
+
+        rows = session.exec(statement).unique().all()
+        return rows
 
 
 @app.post("/groups/{group_id}/add-user/{user_id}")
@@ -292,7 +392,7 @@ async def add_user_to_group(group_id: int, user_id: int):
         }
 
 
-@app.get("/groups/{group_id}/members")
+@app.get("/groups/{group_id}/members", response_model=list[UserPublicAvatar])
 async def get_group_members(group_id: int):
     with Session(engine) as session:
         group = session.get(Group, group_id)
@@ -308,13 +408,15 @@ def send_message_to_group(group_id: int, message_content: str, sender_id: int):
             raise HTTPException(status_code=404, detail="Group not found")
 
         # Create the message
-        message = Message(content=message_content, author_id=sender_id)
+        message = Message(
+            content=message_content, author_id=sender_id, group_id=group_id
+        )
         session.add(message)
         session.commit()
         session.refresh(message)
 
         # Update the group's last message
-        group.last_message = message
+        # group.last_message = message
         session.commit()
 
         return message
@@ -329,8 +431,9 @@ async def send_message(
     return send_message_to_group(group_id, message_content, current_user.id)
 
 
-@app.get("/groups/{group_id}/messages")
+@app.get("/groups/{group_id}/messages", response_model=list[MessagePublic])
 async def get_group_messages(group_id: int, limit: int = 10):
+    limit = min(limit, 100)
     with Session(engine) as session:
         group = session.get(Group, group_id)
         if not group:
@@ -339,7 +442,8 @@ async def get_group_messages(group_id: int, limit: int = 10):
         # Fetch the messages for the group with the specified limit
         messages = session.exec(
             select(Message)
-            .where(Message.parent_id == group_id)
+            .options(joinedload(Message.author))
+            .where(Message.group_id == group_id)
             .order_by(Message.id.desc())
             .limit(limit),
         ).all()

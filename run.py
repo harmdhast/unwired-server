@@ -159,21 +159,20 @@ async def lifespan(app: FastAPI):
     my_id1 = user.id
     user2 = create_user(User(username="test2", password="test"))
     my_id2 = user2.id
-    group = await create_group("Test Group", [user, user2], True, user)
+    group = await create_group(
+        CreateGroupBody(name="Test Group", members=[user2.id], private=True), user
+    )
 
     for i in range(20):
         send_message_to_group(
             group.id, "Lorem ipsum dolor sit amet, consectetur adipiscing elit.", my_id1
         )
-        await asyncio.sleep(0.1)
         send_message_to_group(
             group.id,
             "Fusce vitae magna augue. Morbi ut ligula sollicitudin, pellentesque est vitae, pellentesque magna. In hac habitasse platea dictumst.",
             my_id2,
         )
-        await asyncio.sleep(0.1)
         send_message_to_group(group.id, "Vivamus dictum ligula ante.", my_id2)
-        await asyncio.sleep(0.1)
         send_message_to_group(
             group.id, "Morbi id arcu sit amet eros porttitor bibendum.", my_id1
         )
@@ -356,22 +355,35 @@ async def register(
     )
 
 
+class CreateGroupBody(BaseModel):
+    name: str
+    members: list[int]
+    private: bool = False
+
+
 @app.post("/groups/")
 async def create_group(
-    name: str,
-    members: list[User],
-    private: bool = False,
+    group: CreateGroupBody,
     current_user: User = Depends(get_current_user),
 ):
-    if private and len(members) != 2:
+    if group.private and len(group.members) > 1:
         raise HTTPException(
             status_code=400,
             detail="Private group must have exactly two members",
         )
 
-    group = Group(name=name, owner_id=current_user.id, private=private, members=members)
-
     with Session(engine) as session:
+        members = session.exec(select(User).where(User.id in group.members)).all()
+
+        members.append(current_user)
+
+        group = Group(
+            name=group.name,
+            owner_id=current_user.id,
+            private=group.private,
+            members=members,
+        )
+
         session.add(group)
         session.commit()
         session.refresh(group)
@@ -405,7 +417,7 @@ async def list_groups(
                 ),
             )
             .filter(UserGroupLink.user_id == current_user.id)
-        ).limit(1)
+        )
 
         rows = session.exec(statement).unique().all()
         return rows
@@ -457,13 +469,17 @@ def send_message_to_group(group_id: int, message_content: str, sender_id: int):
         return message
 
 
-@app.post("/groups/{group_id}/send-message")
+class SendMessageBody(BaseModel):
+    message_content: str
+
+
+@app.post("/groups/{group_id}/messages")
 async def send_message(
     group_id: int,
-    message_content: str,
+    content: SendMessageBody,
     current_user: User = Depends(get_current_user),
 ):
-    return send_message_to_group(group_id, message_content, current_user.id)
+    return send_message_to_group(group_id, content.message_content, current_user.id)
 
 
 @app.get("/groups/{group_id}/messages", response_model=list[MessagePublic])

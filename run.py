@@ -71,7 +71,7 @@ class UserGroupLink(SQLModel, table=True):
 
 
 class UserBase(SQLModel):
-    username: str = Field(index=True, nullable=False)
+    username: str = Field(index=True, nullable=False, unique=True)
 
 
 class User(UserBase, table=True):
@@ -301,6 +301,41 @@ async def login(
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
 ) -> LoginResponse:
     user = authenticate_user(form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.username},
+        expires_delta=access_token_expires,
+    )
+    return LoginResponse(
+        access_token=access_token,
+        token_type="bearer",
+        username=user.username,
+        avatar=user.avatar,
+        disabled=user.disabled,
+    )
+
+
+@app.post("/register/")
+async def register(
+    form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
+):
+    with Session(engine) as session:
+        statement = select(User).where(User.username == form_data.username)
+        user = session.exec(statement).first()
+        if user is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Username already exists",
+            )
+
+    user = User(username=form_data.username, password=form_data.password)
+    user = create_user(user)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

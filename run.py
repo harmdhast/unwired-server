@@ -47,8 +47,7 @@ class TokenData(BaseModel):
 class MessageBase(SQLModel):
     parent_id: int | None
     content: str = Field(nullable=False)
-    group_id: int | None = Field(
-        default=None, foreign_key="group.id", index=True)
+    group_id: int | None = Field(default=None, foreign_key="group.id", index=True)
 
 
 class Message(MessageBase, table=True):
@@ -62,10 +61,8 @@ class Message(MessageBase, table=True):
 
 
 class UserGroupLink(SQLModel, table=True):
-    user_id: int | None = Field(
-        default=None, foreign_key="user.id", primary_key=True)
-    group_id: int | None = Field(
-        default=None, foreign_key="group.id", primary_key=True)
+    user_id: int | None = Field(default=None, foreign_key="user.id", primary_key=True)
+    group_id: int | None = Field(default=None, foreign_key="group.id", primary_key=True)
 
 
 class UserBase(SQLModel):
@@ -145,23 +142,37 @@ def create_db_and_tables():
     SQLModel.metadata.create_all(engine)
 
 
+def dummy_data():
+    pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Load the ML model
     create_db_and_tables()
+    # Test data
     user = create_user(User(username="test", password="test"))
+    usercopy = user.model_copy()
     my_id1 = user.id
     user2 = create_user(User(username="test2", password="test"))
-    create_user(User(username="test3", password="test"))
-    create_user(User(username="test4", password="test"))
+    user3 = create_user(User(username="test3", password="test"))
+    user4 = create_user(User(username="test4", password="test"))
     create_user(User(username="test5", password="test"))
     create_user(User(username="test6", password="test"))
     create_user(User(username="test7", password="test"))
     create_user(User(username="test8", password="test"))
     my_id2 = user2.id
     group = await create_group(
-        CreateGroupBody(name="Test Group", members=[
-                        user2.id], private=True), user
+        CreateGroupBody(name="Private Test Group", members=[user2.id], private=True),
+        user,
+    )
+    group2 = await create_group(
+        CreateGroupBody(
+            name="Public Test Group",
+            members=[user2.id, user3.id, user4.id],
+            private=False,
+        ),
+        usercopy,
     )
 
     for i in range(20):
@@ -171,9 +182,9 @@ async def lifespan(app: FastAPI):
         send_message_to_group(
             group.id,
             "Fusce vitae magna augue. Morbi ut ligula sollicitudin, pellentesque est vitae, pellentesque magna. In hac habitasse platea dictumst.",
-            my_id2,
+            user2.id,
         )
-        send_message_to_group(group.id, "Vivamus dictum ligula ante.", my_id2)
+        send_message_to_group(group.id, "Vivamus dictum ligula ante.", user2.id)
         send_message_to_group(
             group.id, "Morbi id arcu sit amet eros porttitor bibendum.", my_id1
         )
@@ -259,6 +270,7 @@ def create_user(user: User):
         session.add(user)
         session.commit()
         session.refresh(user)
+        session.expunge(user)
         return user
 
 
@@ -285,12 +297,13 @@ async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]):
 
 
 @app.get("/users/", response_model=list[UserPublicAvatar])
-async def read_users(current_user: Annotated[User, Depends(get_current_user)], q: str | None = None):
+async def read_users(
+    current_user: Annotated[User, Depends(get_current_user)], q: str | None = None
+):
     with Session(engine) as session:
         statement = select(User).where(User.id != current_user.id)
         if q:
-            statement = statement.where(
-                col(User.username).contains(q))
+            statement = statement.where(col(User.username).contains(q))
         else:
             users = session.exec(statement).all()
         return users
@@ -379,8 +392,7 @@ async def create_group(
         )
 
     with Session(engine) as session:
-        members = session.exec(select(User).where(
-            User.id.in_(group.members))).all()
+        members = session.exec(select(User).where(User.id.in_(group.members))).all()
 
         members.append(current_user)
 
@@ -427,6 +439,27 @@ async def list_groups(
         )
 
         rows = session.exec(statement).unique().all()
+        return rows
+
+
+@app.get("/groups/{group_id}", response_model=GroupPublic)
+async def get_groups(group_id: int, current_user: User = Depends(get_current_user)):
+    with Session(engine) as session:
+        statement = (
+            select(Group)
+            .join(UserGroupLink)
+            .options(
+                joinedload(Group.owner),
+                joinedload(Group.members),
+                joinedload(Group.last_message).joinedload(
+                    Message.author, innerjoin=True
+                ),
+            )
+            .where(Group.id == group_id)
+            .filter(UserGroupLink.user_id == current_user.id)
+        )
+
+        rows = session.exec(statement).unique().first()
         return rows
 
 

@@ -462,10 +462,6 @@ def send_message_to_group(group_id: int, message_content: str, sender_id: int):
         session.commit()
         session.refresh(message)
 
-        # Update the group's last message
-        # group.last_message = message
-        session.commit()
-
         return message
 
 

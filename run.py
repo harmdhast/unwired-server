@@ -131,10 +131,6 @@ class LoginResponse(Token):
     disabled: bool | None = None
 
 
-class MessageWithAuthor(MessageBase):
-    pass
-
-
 DB_URL = "postgresql://postgres:postgres@postgres:5432/postgres"
 
 engine = create_engine(DB_URL, echo=True)
@@ -367,7 +363,7 @@ async def create_group(
         )
 
     with Session(engine) as session:
-        members = session.exec(select(User).where(User.id in group.members)).all()
+        members = session.exec(select(User).where(User.id.in_(group.members))).all()
 
         members.append(current_user)
 
@@ -442,7 +438,9 @@ async def get_group_members(group_id: int):
         return group.members
 
 
-def send_message_to_group(group_id: int, message_content: str, sender_id: int):
+def send_message_to_group(
+    group_id: int, message_content: str, sender_id: int
+) -> MessagePublic:
     with Session(engine) as session:
         group = session.get(Group, group_id)
         if not group:
@@ -454,7 +452,7 @@ def send_message_to_group(group_id: int, message_content: str, sender_id: int):
         )
         session.add(message)
         session.commit()
-        session.refresh(message)
+        session.refresh(message.author)
 
         return message
 
@@ -463,7 +461,7 @@ class SendMessageBody(BaseModel):
     message_content: str
 
 
-@app.post("/groups/{group_id}/messages")
+@app.post("/groups/{group_id}/messages", response_model=MessagePublic)
 async def send_message(
     group_id: int,
     content: SendMessageBody,

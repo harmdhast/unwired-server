@@ -25,6 +25,7 @@ from sqlmodel import Field
 from sqlmodel import Relationship
 from sqlmodel import Session
 from sqlmodel import SQLModel
+from sqlmodel import col
 from sqlmodel import create_engine
 from sqlmodel import select
 from sqlmodel import text
@@ -46,7 +47,8 @@ class TokenData(BaseModel):
 class MessageBase(SQLModel):
     parent_id: int | None
     content: str = Field(nullable=False)
-    group_id: int | None = Field(default=None, foreign_key="group.id", index=True)
+    group_id: int | None = Field(
+        default=None, foreign_key="group.id", index=True)
 
 
 class Message(MessageBase, table=True):
@@ -60,8 +62,10 @@ class Message(MessageBase, table=True):
 
 
 class UserGroupLink(SQLModel, table=True):
-    user_id: int | None = Field(default=None, foreign_key="user.id", primary_key=True)
-    group_id: int | None = Field(default=None, foreign_key="group.id", primary_key=True)
+    user_id: int | None = Field(
+        default=None, foreign_key="user.id", primary_key=True)
+    group_id: int | None = Field(
+        default=None, foreign_key="group.id", primary_key=True)
 
 
 class UserBase(SQLModel):
@@ -148,9 +152,16 @@ async def lifespan(app: FastAPI):
     user = create_user(User(username="test", password="test"))
     my_id1 = user.id
     user2 = create_user(User(username="test2", password="test"))
+    create_user(User(username="test3", password="test"))
+    create_user(User(username="test4", password="test"))
+    create_user(User(username="test5", password="test"))
+    create_user(User(username="test6", password="test"))
+    create_user(User(username="test7", password="test"))
+    create_user(User(username="test8", password="test"))
     my_id2 = user2.id
     group = await create_group(
-        CreateGroupBody(name="Test Group", members=[user2.id], private=True), user
+        CreateGroupBody(name="Test Group", members=[
+                        user2.id], private=True), user
     )
 
     for i in range(20):
@@ -251,13 +262,6 @@ def create_user(user: User):
         return user
 
 
-@app.get("/users/")
-def read_users():
-    with Session(engine) as session:
-        users = session.exec(select(User)).all()
-        return users
-
-
 async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -278,6 +282,18 @@ async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]):
     if user.disabled:
         raise HTTPException(status_code=400, detail="Inactive user")
     return user
+
+
+@app.get("/users/", response_model=list[UserPublicAvatar])
+async def read_users(current_user: Annotated[User, Depends(get_current_user)], q: str | None = None):
+    with Session(engine) as session:
+        statement = select(User).where(User.id != current_user.id)
+        if q:
+            statement = statement.where(
+                col(User.username).contains(q))
+        else:
+            users = session.exec(statement).all()
+        return users
 
 
 @app.get("/users/me", response_model=User)
@@ -363,7 +379,8 @@ async def create_group(
         )
 
     with Session(engine) as session:
-        members = session.exec(select(User).where(User.id.in_(group.members))).all()
+        members = session.exec(select(User).where(
+            User.id.in_(group.members))).all()
 
         members.append(current_user)
 

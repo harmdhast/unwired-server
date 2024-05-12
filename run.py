@@ -3,6 +3,7 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from io import BytesIO
+from pathlib import Path
 from typing import Annotated
 
 import distinctipy
@@ -47,7 +48,8 @@ class TokenData(BaseModel):
 class MessageBase(SQLModel):
     parent_id: int | None
     content: str = Field(nullable=False)
-    group_id: int | None = Field(default=None, foreign_key="group.id", index=True)
+    group_id: int | None = Field(
+        default=None, foreign_key="group.id", index=True)
 
 
 class Message(MessageBase, table=True):
@@ -61,8 +63,10 @@ class Message(MessageBase, table=True):
 
 
 class UserGroupLink(SQLModel, table=True):
-    user_id: int | None = Field(default=None, foreign_key="user.id", primary_key=True)
-    group_id: int | None = Field(default=None, foreign_key="group.id", primary_key=True)
+    user_id: int | None = Field(
+        default=None, foreign_key="user.id", primary_key=True)
+    group_id: int | None = Field(
+        default=None, foreign_key="group.id", primary_key=True)
 
 
 class UserBase(SQLModel):
@@ -126,6 +130,13 @@ class GroupPublic(GroupBase):
     last_message: MessagePublic | None = None
 
 
+class GroupPublicFull(GroupBase):
+    id: int
+    owner: UserPublic | None = None
+    members: list[UserPublicAvatar] | None = []
+    last_message: MessagePublic | None = None
+
+
 class LoginResponse(Token):
     username: str
     avatar: str | None = None
@@ -142,15 +153,7 @@ def create_db_and_tables():
     SQLModel.metadata.create_all(engine)
 
 
-def dummy_data():
-    pass
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Load the ML model
-    create_db_and_tables()
-    # Test data
+async def dummy_data():
     user = create_user(User(username="test", password="test"))
     usercopy = user.model_copy()
     my_id1 = user.id
@@ -161,9 +164,14 @@ async def lifespan(app: FastAPI):
     create_user(User(username="test6", password="test"))
     create_user(User(username="test7", password="test"))
     create_user(User(username="test8", password="test"))
+    create_user(User(username="test9", password="test"))
+    create_user(User(username="test10", password="test"))
+    create_user(User(username="test11", password="test"))
+    create_user(User(username="test12", password="test"))
     my_id2 = user2.id
     group = await create_group(
-        CreateGroupBody(name="Private Test Group", members=[user2.id], private=True),
+        CreateGroupBody(name="Private Test Group",
+                        members=[user2.id], private=True),
         user,
     )
     group2 = await create_group(
@@ -184,10 +192,38 @@ async def lifespan(app: FastAPI):
             "Fusce vitae magna augue. Morbi ut ligula sollicitudin, pellentesque est vitae, pellentesque magna. In hac habitasse platea dictumst.",
             user2.id,
         )
-        send_message_to_group(group.id, "Vivamus dictum ligula ante.", user2.id)
+        send_message_to_group(
+            group.id, "Vivamus dictum ligula ante.", user2.id)
         send_message_to_group(
             group.id, "Morbi id arcu sit amet eros porttitor bibendum.", my_id1
         )
+
+    for i in range(20):
+        send_message_to_group(
+            group2.id, "Lorem ipsum dolor sit amet, consectetur adipiscing elit.", my_id1
+        )
+        send_message_to_group(
+            group2.id,
+            "Fusce vitae magna augue. Morbi ut ligula sollicitudin, pellentesque est vitae, pellentesque magna. In hac habitasse platea dictumst.",
+            user2.id,
+        )
+        send_message_to_group(
+            group2.id, "Vivamus dictum ligula ante.", user3.id)
+        send_message_to_group(
+            group2.id, "Morbi id arcu sit amet eros porttitor bibendum.", user3.id
+        )
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Load the ML model
+    if not Path("./setup").exists():
+        create_db_and_tables()
+        # Test data
+        await dummy_data()
+        with Path("./setup") as f:
+            f.write_text("")
+
     yield
 
 
@@ -304,9 +340,8 @@ async def read_users(
         statement = select(User).where(User.id != current_user.id)
         if q:
             statement = statement.where(col(User.username).contains(q))
-        else:
-            users = session.exec(statement).all()
-        return users
+
+        return session.exec(statement).all()
 
 
 @app.get("/users/me", response_model=User)
@@ -392,7 +427,8 @@ async def create_group(
         )
 
     with Session(engine) as session:
-        members = session.exec(select(User).where(User.id.in_(group.members))).all()
+        members = session.exec(select(User).where(
+            User.id.in_(group.members))).all()
 
         members.append(current_user)
 
@@ -442,7 +478,7 @@ async def list_groups(
         return rows
 
 
-@app.get("/groups/{group_id}", response_model=GroupPublic)
+@app.get("/groups/{group_id}", response_model=GroupPublicFull)
 async def get_groups(group_id: int, current_user: User = Depends(get_current_user)):
     with Session(engine) as session:
         statement = (
@@ -463,20 +499,34 @@ async def get_groups(group_id: int, current_user: User = Depends(get_current_use
         return rows
 
 
-@app.post("/groups/{group_id}/add-user/{user_id}")
-async def add_user_to_group(group_id: int, user_id: int):
+@app.post("/groups/{group_id}/add-user/{user_id}", response_model=GroupPublic)
+async def add_user_to_group(group_id: int, user_id: int, current_user: User = Depends(get_current_user)):
     with Session(engine) as session:
-        group = session.get(Group, group_id)
+        statement = (
+            select(Group)
+            .join(UserGroupLink)
+            .options(
+                joinedload(Group.owner),
+                joinedload(Group.members),
+                joinedload(Group.last_message).joinedload(
+                    Message.author, innerjoin=True,
+                ),
+            )
+            .where(Group.id == group_id)
+            .filter(UserGroupLink.user_id == current_user.id)
+        )
+
+        group = session.exec(statement).unique().first()
         if not group:
             raise HTTPException(status_code=404, detail="Group not found")
         user = session.get(User, user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         group.members.append(user)
+        session.add(group)
         session.commit()
-        return {
-            "message": f"User '{user.username}' added to group '{group.name}' successfully",
-        }
+        session.refresh(group)
+        return group
 
 
 @app.get("/groups/{group_id}/members", response_model=list[UserPublicAvatar])
@@ -495,6 +545,14 @@ def send_message_to_group(
         group = session.get(Group, group_id)
         if not group:
             raise HTTPException(status_code=404, detail="Group not found")
+
+        user = session.get(User, sender_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        if user not in group.members:
+            raise HTTPException(
+                status_code=404, detail="User does not belong to group")
 
         # Create the message
         message = Message(
